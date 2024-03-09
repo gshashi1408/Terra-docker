@@ -9,9 +9,10 @@ sudo systemctl status docker
 sudo chmod 777 /var/run/docker.sock
 docker -ps 
 sudo docker run -it ubuntu:20.04
+mkdir test2
 git clone https://github.com/gshashi1408/Terra-docker.git
-cd Terra-docker/test1/
-cp -r /var/lib/docker /home/ubuntu/Terra-docker/
+cd Terra-docker
+cp -R /home/ubuntu/test2 /home/ubuntu/Terra-docker
 git add .
 git commit -m "pusing docker file"
 git push origin main
