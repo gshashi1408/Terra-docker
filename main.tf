@@ -1,4 +1,4 @@
-resource "aws_instance" "Docker2" {
+resource "aws_instance" "Docker3" {
   ami           = "ami-03bb6d83c60fc5f7c"
   availability_zone = "ap-south-1a"
   instance_type = "t2.micro"
@@ -21,7 +21,7 @@ resource "aws_instance" "Docker2" {
   EOF
 
   tags = {
-    Name  = "Docker2"
+    Name  = "Docker3"
     Location = "Mumbai"
   }
 
