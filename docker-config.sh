@@ -11,9 +11,9 @@ docker -ps
 sudo docker run -it ubuntu:20.04
 cd /home/ubuntu/
 mkdir test2
-git clone https://github.com/gshashi1408/Terra-docker.git
+git remote add origin https://github.com/gshashi1408/Terra-docker.git
 cd Terra-docker
 cp -r /home/ubuntu/test2 /home/ubuntu/Terra-docker
 git add .
 git commit -m "pushing docker file"
-git push https://github.com/gshashi1408/Terra-docker.git main
+git push -u origin develop
