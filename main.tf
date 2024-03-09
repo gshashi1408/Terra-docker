@@ -3,7 +3,7 @@ resource "aws_instance" "Docker3" {
   availability_zone = "ap-south-1a"
   instance_type = "t2.micro"
   key_name = "key2"
-  user_data = filebase64("docker-config.sh")
+  user_data = file("docker-config.sh")
 
   tags = {
     Name  = "Docker3"
