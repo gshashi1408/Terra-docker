@@ -73,6 +73,7 @@ pipeline {
             }
             
             steps {
+                sh "chmod 777 ./docker-config.sh"
                 sh "terraform apply -input=false tfplan"
             }
         }
