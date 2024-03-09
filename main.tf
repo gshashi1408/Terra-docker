@@ -9,5 +9,9 @@ resource "aws_instance" "Docker3" {
     Name  = "Docker3"
     Location = "Mumbai"
   }
+}
 
+output "public_ip" {
+  value       = aws_instance.Docker3.public_ip
+  description = "The public IP of the Instance"
 }
