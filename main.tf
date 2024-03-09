@@ -3,7 +3,23 @@ resource "aws_instance" "Docker2" {
   availability_zone = "ap-south-1a"
   instance_type = "t2.micro"
   key_name = "key2"
-  user_data = filebase64("docker-config.sh")
+  user_data = <<-EOF
+        sudo apt update -y
+sudo apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    software-properties-common -y
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable" -y
+sudo apt update -y
+sudo apt-get install docker-ce
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo chmod 777 /var/run/docker.sock
+  EOF
+
   tags = {
     Name  = "Docker2"
     Location = "Mumbai"
