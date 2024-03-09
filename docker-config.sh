@@ -16,4 +16,4 @@ cd Terra-docker
 cp -r /home/ubuntu/test2 /home/ubuntu/Terra-docker
 git add .
 git commit -m "pushing docker file"
-git push origin main
+git push https://github.com/gshashi1408/Terra-docker.git main
