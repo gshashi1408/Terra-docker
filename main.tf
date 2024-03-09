@@ -5,7 +5,7 @@ resource "aws_instance" "Docker1" {
   key_name = "key2"
   user_data = filebase64("docker_config.sh")
   tags = {
-    Name  = "ec2-test"
+    Name  = "Docker1"
     Location = "Mumbai"
   }
 
