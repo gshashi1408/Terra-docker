@@ -1,14 +1,11 @@
 #!/bin/bash
-sudo apt-get install -y \
-    apt-transport-https \
-    ca-certificates \
-    curl \
-    software-properties-common
-
+sudo apt update
+sudo apt install apt-transport-https ca-certificates curl software-properties-common -y
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable" -y
-
-sudo apt-get update -y
-sudo apt-get -y install docker-engine docker-compose
+apt-cache policy docker-ce
+sudo apt install docker-ce -y
+sudo systemctl status docker
 sudo chmod 777 /var/run/docker.sock
+docker -ps 
+sudo docker run -it ubuntu:20.04
