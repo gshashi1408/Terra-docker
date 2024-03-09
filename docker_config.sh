@@ -7,4 +7,3 @@ sudo apt update
 sudo apt-get install docker-ce
 sudo systemctl start docker
 sudo systemctl enable docker
-sudo groupadd docker
