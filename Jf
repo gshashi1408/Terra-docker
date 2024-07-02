@@ -1,0 +1,257 @@
+@Library(['thor-shared-pipelines', 'sift-shared-library']) _
+
+pullRequestBuild = env.CHANGE_TARGET ? true : false;
+
+def buildArtifactName() {
+  def artifactBaseName = env.ARTIFACT_NAME
+  def branchName = env.GIT_BRANCH.replaceAll('origin/', '')
+  def gitCommitHash = env.GIT_COMMIT_HASH
+  def artifactName
+
+  if (branchName == 'china') {
+      artifactName = "${artifactBaseName}:${microApp}-latest"
+  } else {
+      def safeBranchName = branchName.replaceAll('[^A-Za-z0-9_-]', '_').toLowerCase()
+      artifactName = "${artifactBaseName}:${safeBranchName}"
+  }
+
+  return artifactName
+}
+
+pipeline {
+  agent {
+    label 'base'
+  }
+
+  tools {
+    jdk 'JDK8'
+  }
+
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    disableConcurrentBuilds()
+    timestamps()
+  }
+
+  environment {
+    SCANNER_HOME = tool 'sonar-scanner'
+    SECRET_SONARQUBE_TOKEN = credentials('cdaas-sonar-bot')
+    GIT_COMMITTER_EMAIL = sh(script: "git --no-pager show -s --format='%ae' $GIT_COMMIT", returnStdout: true).trim()
+    GIT_GENERIC_CREDS = 'sift-reporting-gen-github'
+    BRANCH_NAME = env.GIT_BRANCH.replaceAll('origin/', '')
+    AWS_ACC_PROD = '563853376529'
+    AWS_ACC_STAGE = '072824598875'
+    AWS_ROLE = 'jenkins-sift-cdaas'
+    AWS_REGION = 'us-west-2'
+    AWS_ECR_REPO = "dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+    ARTIFACT_NAME = 'china/scheduled-reports'
+    CORONA_GEN_USER = credentials('corona-cec-user')
+    CORONA_GEN_TOKEN = credentials('corona-cec-token')
+    CORONA_PRODUCT_ID = '12848'
+    CORONA_CSDL_ID = '243005'
+    CORONA_ENGINEERING_CONTACT = 'opendns-eng.sift@cisco.com'
+    CORONA_RELEASE_NAME = '1.1'
+    WEBEX_ROOM_ID = credentials('orlok-govcloud-webex-room-id')
+    WEBEX_BOT_TOKEN = 'sift-jenkins-webex-bot-token'
+    PUSH_DIRECTLY_TO_CHINA = true
+    CHINA_DEV_CRED_ID = 'cicdbotuser-china-dev-creds'
+    CHINA_DEV_IAM_ROLE = 'arn:aws-cn:iam::114040874283:role/CICDBotRole'
+    CHINA_AWS_ACC_DEV = '114040874283'
+    CHINA_DEV_ECR = '114040874283.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
+    CHINA_AWS_REGION = 'cn-northwest-1'
+    CHINA_PROD_CRED_ID = 'cicdbotuser-china-prod-creds'
+    CHINA_PROD_IAM_ROLE = 'arn:aws-cn:iam::146618076670:role/CICDBotRole'
+    CHINA_AWS_ACC_PROD = '146618076670'
+    CHINA_PROD_ECR = '146618076670.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
+  }
+
+  parameters {
+    string(name: 'SCHEDULED_REPORTS_GIT_BRANCH', defaultValue: 'china', description: 'scheduled-reports branch (Defaults to china)')
+    choice(name: 'COMPONENT', choices: ['all', 'api-server', 'scheduler', 'worker'], description: 'Select the component/s to build', multiple: true)
+  }
+
+  stages {
+    stage('Clean workspace') {
+      steps {
+        cleanWs()
+      }
+    }
+
+    stage('Display Parameters') {
+      steps {
+        script {
+          if ((params.COMPONENT.length() == 0) || (params.COMPONENT.contains('all') && params.COMPONENT.length() > 1)) {
+            currentBuild.result = "ABORTED"
+            error('Build aborted! Component not selected / all must not be selected with other components')
+          }
+
+          env.COMPONENT = params.COMPONENT.join(',')
+          env.SCHEDULED_REPORTS_GIT_BRANCH = params.SCHEDULED_REPORTS_GIT_BRANCH ? params.SCHEDULED_REPORTS_GIT_BRANCH : 'china'
+        }
+      }
+    }
+
+    stage('Clone scheduled-reports repo') {
+      when {
+        expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+      }
+      steps {
+        script {
+          def scmVars = checkout([
+            $class: 'GitSCM',
+            branches: scm.branches,
+            doGenerateSubmoduleConfigurations: scm.doGenerateSubmoduleConfigurations,
+            extensions: [[$class: 'CloneOption', noTags: false, reference: '', shallow: false]],
+            userRemoteConfigs: scm.userRemoteConfigs
+          ])
+          env.GIT_COMMIT_HASH = scmVars.GIT_COMMIT.substring(0, 6)
+          env.GIT_TAG = sh(script: 'git describe --tags --abbrev=0', returnStdout: true).trim()
+
+          currentBuild.displayName = env.SCHEDULED_REPORTS_GIT_BRANCH == 'china' ?
+            "${env.GIT_TAG}_#${currentBuild.number}" :
+            "${env.GIT_TAG}_${env.SCHEDULED_REPORTS_GIT_BRANCH}_${GIT_COMMIT_HASH}_#${currentBuild.number}"
+        }
+      }
+    }
+
+    stage('Build selected components') {
+      when {
+        expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+      }
+      steps {
+        script {
+          try {
+            def selectedMicroApps = env.COMPONENT.tokenize(',').unique()
+            buildApp(selectedMicroApps, pullRequestBuild, env.SCHEDULED_REPORTS_GIT_BRANCH)
+          } catch (Exception e) {
+            error "Error during build process: ${e.message}"
+          }
+        }
+      }
+    }
+
+    stage('Upload to Corona') {
+      when {
+        allOf {
+          branch 'china'
+          expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+        }
+      }
+      steps {
+        script {
+          withChecks('Corona - Upload') {
+            SendToCorona(
+              username: env.CORONA_GEN_USER,
+              password: env.CORONA_GEN_TOKEN,
+              productId: env.CORONA_PRODUCT_ID,
+              csdlIdentifier: env.CORONA_CSDL_ID,
+              engineeringContact: env.CORONA_ENGINEERING_CONTACT,
+              image: buildArtifactName(),
+              imageType: 'docker',
+              releaseName: env.CORONA_RELEASE_NAME
+            )
+          }
+        }
+      }
+    }
+
+    stage('Tag and push to Commercial staging ECR') {
+      when {
+        allOf {
+          environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'false'
+          expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+        }
+      }
+      steps {
+        script {
+          withChecks('Docker upload - Staging ECR') {
+            withAWS(roleAccount: env.AWS_ACC_STAGE, role: env.AWS_ROLE, region: env.AWS_REGION) {
+              echo "Artifact name: ${buildArtifactName()}"
+              def exitCode = sh(script: """#!/usr/bin/env bash
+                set -e
+                aws ecr get-login-password --region us-west-2 | docker login -u AWS --password-stdin https://${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/
+                docker tag ${buildArtifactName()} ${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/${buildArtifactName()}
+                docker push ${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/${buildArtifactName()}
+              """, returnStatus: true)
+              if (exitCode == 0) {
+                publishChecks([name: 'Docker upload - Staging ECR', title: 'Passed successfully!'])
+              } else {
+                publishChecks([name: 'Docker upload - Staging ECR', title: 'Docker upload to Staging ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
+                error "Docker upload to Staging ECR Failed!"
+              }
+            }
+          }
+        }
+      }
+    }
+
+    stage('Tag and push to China dev ECR') {
+      when {
+        allOf {
+          environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'true'
+          expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+        }
+      }
+      steps {
+        script {
+          withChecks('Docker upload - China dev ECR') {
+            withAWS(credentials: env.CHINA_DEV_CRED_ID, roleAccount: env.CHINA_AWS_ACC_DEV, role: env.CHINA_DEV_IAM_ROLE, region: env.CHINA_AWS_REGION) {
+              echo "Artifact name: ${buildArtifactName()}"
+              def exitCode = sh(script: """#!/usr/bin/env bash
+                set -e
+                aws ecr get-login-password --region ${env.CHINA_AWS_REGION} | docker login -u AWS --password-stdin https://${env.CHINA_DEV_ECR}
+                docker tag ${buildArtifactName()} ${env.CHINA_DEV_ECR}/${buildArtifactName()}
+                docker push ${env.CHINA_DEV_ECR}/${buildArtifactName()}
+              """, returnStatus: true)
+              if (exitCode == 0) {
+                publishChecks([name: 'Docker upload - China dev ECR', title: 'Passed successfully!'])
+              } else {
+                publishChecks([name: 'Docker upload - China dev ECR', title: 'Docker upload to China dev ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
+                error "Docker upload to China dev ECR Failed!"
+              }
+            }
+          }
+        }
+      }
+    }
+
+    stage('Tag and push to China prod ECR') {
+      when {
+        allOf {
+          branch 'china'
+          expression { params.COMPONENT.contains('api-server') || params.COMPONENT.contains('scheduler') || params.COMPONENT.contains('worker') || params.COMPONENT.contains('all') }
+        }
+      }
+      steps {
+        script {
+          withChecks('Docker upload - China prod ECR') {
+            withAWS(credentials: env.CHINA_PROD_CRED_ID, roleAccount: env.CHINA_AWS_ACC_PROD, role: env.CHINA_PROD_IAM_ROLE, region: env.CHINA_AWS_REGION) {
+              echo "Artifact name: ${buildArtifactName()}"
+              def exitCode = sh(script: """#!/usr/bin/env bash
+                set -e
+                aws ecr get-login-password --region ${env.CHINA_AWS_REGION} | docker login -u AWS --password-stdin https://${env.CHINA_PROD_ECR}
+                docker tag ${buildArtifactName()} ${env.CHINA_PROD_ECR}/${buildArtifactName()}
+                docker push ${env.CHINA_PROD_ECR}/${buildArtifactName()}
+              """, returnStatus: true)
+              if (exitCode == 0) {
+                publishChecks([name: 'Docker upload - China prod ECR', title: 'Passed successfully!'])
+              } else {
+                publishChecks([name: 'Docker upload - China prod ECR', title: 'Docker upload to China prod ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
+                error "Docker upload to China prod ECR Failed!"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        currentBuild.displayName = currentBuild.currentResult + ' ' + currentBuild.displayName
+        cleanWs()
+      }
+    }
+  }
+}
