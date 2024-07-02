@@ -2,8 +2,8 @@
 
 pullRequestBuild = env.CHANGE_TARGET ? true : false;
 
-def buildArtifactName() {
-  def artifactBaseName = env.ARTIFACT_NAME
+def buildArtifactName(String baseName) {
+  def artifactBaseName = baseName
   def branchName = env.GIT_BRANCH.replaceAll('origin/', '')
   def gitCommitHash = env.GIT_COMMIT_HASH
   def artifactName
@@ -11,7 +11,6 @@ def buildArtifactName() {
   if (branchName == 'china') {
       artifactName = "${artifactBaseName}:${env.GIT_TAG}-${gitCommitHash}-${currentBuild.number}"
   } else {
-      // Replace any characters not allowed in filenames with underscores
       def safeBranchName = branchName.replaceAll('[^A-Za-z0-9_-]', '_').toLowerCase()
       artifactName = "${artifactBaseName}:${safeBranchName}"
   }
@@ -40,7 +39,6 @@ pipeline {
     CLJ_BINARY_URL = 'https://github.com/clj-holmes/clj-holmes/releases/latest/download/clj-holmes-ubuntu-latest'
     SCANNER_HOME = tool 'sonar-scanner'
     SECRET_SONARQUBE_TOKEN = credentials('cdaas-sonar-bot')
-    // Used for sending Private Webex notification if the SonarQube Quality Gate fails
     GIT_COMMITTER_EMAIL = sh(script: "git --no-pager show -s --format='%ae' $GIT_COMMIT", returnStdout: true).trim()
     GIT_GENERIC_CREDS = 'sift-reporting-gen-github'
     BRANCH_NAME = env.GIT_BRANCH.replaceAll('origin/', '')
@@ -68,6 +66,8 @@ pipeline {
     CHINA_PROD_IAM_ROLE = 'arn:aws-cn:iam::146618076670:role/CICDBotRole'
     CHINA_AWS_ACC_PROD = '146618076670'
     CHINA_PROD_ECR = '146618076670.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
+    MICROAPP1_NAME = 'microapp1'
+    MICROAPP2_NAME = 'microapp2'
   }
 
   stages {
@@ -98,51 +98,6 @@ pipeline {
         }
       }
     }
-
-    // Will unmute below once the issues with Tests stage will be resolved
-    // stage('Tests - docker-compose') {
-    //   steps {
-    //     withAWS(
-    //       roleAccount: env.AWS_ACC_PROD, 
-    //       role: env.AWS_ROLE,
-    //       region: env.AWS_REGION
-    //     ) {
-    //       script {
-    //         withChecks('Tests - Docker-compose') {
-    //           def exitCode = sh(script: """#!/usr/bin/env bash
-    //             set -e
-    //             echo '========================================='
-    //             echo "Setting credentials for profile 'default'"
-    //             echo '^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^'
-    //             aws configure set aws_access_key_id "\$AWS_ACCESS_KEY_ID" --profile default
-    //             aws configure set aws_secret_access_key "\$AWS_SECRET_ACCESS_KEY" --profile default
-    //             aws configure set aws_session_token "\$AWS_SESSION_TOKEN" --profile default
-    //             aws configure set s3.signature_version s3v4
-
-    //             echo "Let's see who we are:"
-    //             aws sts get-caller-identity
-                
-    //             echo "Logging into AWS ECR...🔐"
-    //             aws ecr get-login-password --region "\$AWS_REGION" | docker login -u AWS --password-stdin https://${env.AWS_ACC_PROD}.dkr.ecr.us-west-2.amazonaws.com/
-
-    //             # start containers
-    //             docker-compose up --build --exit-code-from orlok
-    //             # stop and remove containers
-    //             docker-compose rm -f -s
-    //             # remove volumes
-    //             docker volume rm \$(docker volume ls -q)
-    //           """, returnStdout: true)
-    //           if (exitCode == 0) {
-    //             publishChecks([name: 'Tests - Docker-compose', title: 'Passed successfully!'])
-    //           } else {
-    //             publishChecks([name: 'Tests - Docker-compose', title: 'Tests stage Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-    //             error "Tests stage Failed!"
-    //           }
-    //         }
-    //       }
-    //     }
-    //   }
-    // }
 
     stage('Static Analysis') {
       steps {
@@ -240,288 +195,65 @@ pipeline {
             git push origin \$NEWTAG
             echo " "
             if [ \$? -eq 0 ]; then
-              echo "✅ OK - version \$NEWTAG tagged and pushed to Github";
+              echo "pushed \$NEWTAG"
             else
-              echo "❌ FAIL - Failed to push version \$NEWTAG to Github";
+              echo "push failed"
             fi
           """
         }
       }
     }
 
-    stage('Build JAR and Docker image') {
+    stage('Build Docker Images') {
       steps {
-        script {
-          withChecks('Docker - Build') {
-            withAWS(
-              roleAccount: env.AWS_ACC_PROD, 
-              role: env.AWS_ROLE,
-              region: env.AWS_REGION
-            ) {
-              artifactName = buildArtifactName()
-              def exitCode = sh(script: """#!/usr/bin/env bash
-                set -e
-                echo "Let's see who we are:"
-                aws sts get-caller-identity
-
-                echo "Setting credentials for profile 'default'"
-                aws configure set aws_access_key_id "\$AWS_ACCESS_KEY_ID" --profile default
-                aws configure set aws_secret_access_key "\$AWS_SECRET_ACCESS_KEY" --profile default
-                aws configure set aws_session_token "\$AWS_SESSION_TOKEN" --profile default
-                aws configure set s3.signature_version s3v4
-
-                echo "======================="
-                echo "Fetching Leiningen!..📥"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^"
-                curl -sS -O -L "https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein"
-                chmod +x lein
-
-                aws ecr get-login-password --region "\$AWS_REGION" | docker login -u AWS --password-stdin https://${AWS_ACC_PROD}.dkr.ecr.us-west-2.amazonaws.com/
-
-                echo "===================="
-                echo "Copying JARs from S3"
-                echo "^^^^^^^^^^^^^^^^^^^^"
-                aws s3 cp s3://avc-reporting/REPORTING.json ./REPORTING.json --only-show-errors &
-                aws s3 cp s3://cdfw-application-category-artifacts-production/cdfw_apps_categories.json ./cdfw_apps_categories.json --only-show-errors &
-                aws s3 cp s3://cdfw-application-category-artifacts-production/casi-app-category-mapping.json ./casi-app-category-mapping.json --only-show-errors &
-                aws s3 cp s3://casi-mapping-prod/casi_nbar_openappid_mapping.csv ./casi_nbar_openappid_mapping.csv --only-show-errors &
-                aws s3 cp s3://ipsconfig-internal-artifacts-prod-us-west-2/ntd_db_slim.zip ./ntd_db_slim.zip --only-show-errors &
-                aws s3 cp s3://sift-files/threat-definitions/latest/threat-descriptions.json ./threat-descriptions.json --only-show-errors &
-                
-                wait
-
-                echo "============================="
-                echo "Starting Leiningen build!..🛠️"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-                ./lein uberjar
-
-                echo "Starting docker build!..🚧"
-                docker build -f Dockerfile.k8s \\
-                  --no-cache --build-arg orlok_config_file_name=orlok-kubernetes-template.edn \\
-                  -t ${artifactName} .
-              """, returnStatus: true)
-              if (exitCode == 0) {
-                publishChecks([name: 'Docker - Build', title: 'Passed successfully!'])
-              } else {
-                publishChecks([name: 'Docker - Build', title: 'Docker build stage Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-                error "Docker build!"
-              }
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          script {
+            docker.withRegistry("https://${AWS_ECR_REPO}") {
+              dockerImage = docker.build("baseImage:${env.BRANCH_NAME}")
             }
+            dockerImage.push()
           }
         }
       }
     }
 
-    stage('Upload to Corona') {
-      when {
-        branch 'china'
-      }
+    stage('Deploy microapp1') {
       steps {
-        script {
-          withChecks('Corona - Upload') {
-            SendToCorona(
-              username: env.CORONA_GEN_USER,
-              password: env.CORONA_GEN_TOKEN,
-              productId: env.CORONA_PRODUCT_ID,
-              csdlIdentifier: env.CORONA_CSDL_ID,
-              engineeringContact: env.CORONA_ENGINEERING_CONTACT,
-              image: "${artifactName}",
-              imageType: 'docker',
-              releaseName: env.CORONA_RELEASE_NAME
-            )            
-          }
-        }
-      }
-    }
-
-    stage('Tag and push to Commercial staging ECR') {
-      when{
-          environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'false'
-      }
-      steps {
-        script {
-          withChecks('Docker upload - Staging ECR') {
-            withAWS(
-              roleAccount: env.AWS_ACC_STAGE, 
-              role: env.AWS_ROLE,
-              region: env.AWS_REGION
-            ) {
-              echo "Artifact name: ${artifactName}"
-              def exitCode = sh(script: """#!/usr/bin/env bash
-                set -e
-                echo "==========================="
-                echo "Uploading Docker image!..📤"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-                aws ecr get-login-password --region us-west-2 | docker login -u AWS --password-stdin https://${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/
-                docker tag ${artifactName} ${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/${artifactName}
-                docker push ${env.AWS_ACC_STAGE}.dkr.ecr.us-west-2.amazonaws.com/${artifactName}
-              """, returnStatus: true)
-              if (exitCode == 0) {
-                publishChecks([name: 'Docker upload - Staging ECR', title: 'Passed successfully!'])
-              } else {
-                publishChecks([name: 'Docker upload - Staging ECR', title: 'Docker upload to Staging ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-                error "Docker upload to Staging ECR Failed!"
-              }
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          script {
+            docker.withRegistry("https://${AWS_ECR_REPO}") {
+              dockerImage = docker.build("${MICROAPP1_NAME}:${env.BRANCH_NAME}")
             }
+            dockerImage.push()
           }
         }
       }
     }
 
-    stage('Tag and push to china dev ECR') {
-      when{
-          environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'true'
-      }
+    stage('Deploy microapp2') {
       steps {
-        script {
-          withChecks('Docker upload - China dev ECR') {
-            withAWS(
-              credentials: env.CHINA_DEV_CRED_ID,
-              roleAccount: env.CHINA_AWS_ACC_DEV, 
-              role: env.CHINA_DEV_IAM_ROLE,
-              region: env.CHINA_AWS_REGION
-            ) {
-              echo "Artifact name: ${artifactName}"
-              def exitCode = sh(script: """#!/usr/bin/env bash
-                set -e
-                echo "==========================="
-                echo "Uploading Docker image!..📤"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-                aws ecr get-login-password --region ${env.CHINA_AWS_REGION} | docker login -u AWS --password-stdin https://${env.CHINA_DEV_ECR}/
-                docker tag ${artifactName} ${env.CHINA_DEV_ECR}/${artifactName}
-                docker push ${env.CHINA_DEV_ECR}/${artifactName}
-              """, returnStatus: true)
-              if (exitCode == 0) {
-                publishChecks([name: 'Docker upload - China dev ECR', title: 'Passed successfully!'])
-              } else {
-                publishChecks([name: 'Docker upload - China dev ECR', title: 'Docker upload to China dev ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-                error "Docker upload to China dev ECR Failed!"
-              }
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          script {
+            docker.withRegistry("https://${AWS_ECR_REPO}") {
+              dockerImage = docker.build("${MICROAPP2_NAME}:${env.BRANCH_NAME}")
             }
+            dockerImage.push()
           }
         }
       }
     }
-
-    stage('Tag and push to Prod ECR') {
-      when {
-        allOf {
-          branch 'china'
-          environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'false'
-        }
-      }
-      steps {
-        script {
-          withChecks('Docker upload - Prod ECR') {
-            withAWS(
-              roleAccount: env.AWS_ACC_PROD, 
-              role: env.AWS_ROLE,
-              region: env.AWS_REGION
-            ) {
-              echo "Artifact name: ${artifactName}"
-              def exitCode = sh(script: """#!/usr/bin/env bash
-                set -e
-                echo "==========================="
-                echo "Uploading Docker image!..📤"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-                aws ecr get-login-password --region us-west-2 | docker login -u AWS --password-stdin https://${env.AWS_ACC_PROD}.dkr.ecr.us-west-2.amazonaws.com/
-                docker tag ${artifactName} ${env.AWS_ACC_PROD}.dkr.ecr.us-west-2.amazonaws.com/${artifactName}
-                docker push ${env.AWS_ACC_PROD}.dkr.ecr.us-west-2.amazonaws.com/${artifactName}
-              """, returnStatus: true)
-              if (exitCode == 0) {
-                publishChecks([name: 'Docker upload - Prod ECR', title: 'Passed successfully!'])
-              } else {
-                publishChecks([name: 'Docker upload - Prod ECR', title: 'Docker upload to Prod ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-                error "Docker upload to Prod ECR Failed!"
-              }
-            }
-          }
-        }
-      }
-    }
-
-    stage('Tag and push to china prod ECR') {
-      when{
-          allOf {
-            branch 'china'
-            environment name: 'PUSH_DIRECTLY_TO_CHINA', value: 'true'
-        }
-      }
-      steps {
-        script {
-          withChecks('Docker upload - China prod ECR') {
-            withAWS(
-              credentials: env.CHINA_PROD_CRED_ID,
-              roleAccount: env.CHINA_AWS_ACC_PROD, 
-              role: env.CHINA_PROD_IAM_ROLE,
-              region: env.CHINA_AWS_REGION
-            ) {
-              echo "Artifact name: ${artifactName}"
-              def exitCode = sh(script: """#!/usr/bin/env bash
-                set -e
-                echo "==========================="
-                echo "Uploading Docker image!..📤"
-                echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-                aws ecr get-login-password --region ${env.CHINA_AWS_REGION} | docker login -u AWS --password-stdin https://${env.CHINA_PROD_ECR}/
-                docker tag ${artifactName} ${env.CHINA_PROD_ECR}/${artifactName}
-                docker push ${env.CHINA_PROD_ECR}/${artifactName}
-              """, returnStatus: true)
-              if (exitCode == 0) {
-                publishChecks([name: 'Docker upload - China dev ECR', title: 'Passed successfully!'])
-              } else {
-                publishChecks([name: 'Docker upload - China dev ECR', title: 'Docker upload to China dev ECR Failed!', summary: "Exit code: ${exitCode}", conclusion: 'FAILURE'])
-                error "Docker upload to China dev ECR Failed!"
-              }
-            }
-          }
-        }
-      }
-    }
-
   }
-
   post {
-    success {
-      script {
-        if (pullRequestBuild) {
-          messageTitle = "### $env.JOB_NAME - PR Build Finished ✅ 👍\\n**Title:** $env.CHANGE_TITLE\\n**Author:** $env.CHANGE_AUTHOR_EMAIL"
-        } else {
-          messageTitle = "### $env.JOB_NAME - Build Finished ✅ 👍"
-        }
-        sendWebexMessage(credentialsId: env.WEBEX_BOT_TOKEN,
-          recipientType: 'roomId',
-          recipientId: env.WEBEX_ROOM_ID,
-          message: "$messageTitle\\n"+
-                  "**Build URL:** [$env.JOB_NAME#$env.BUILD_NUMBER]($env.BUILD_URL)\\n"+
-                  "**Branch:** $env.BRANCH_NAME\\n"+
-                  "**Status:** SUCCESS"
-        )
-      }
-    }
-
     failure {
       script {
-        if (pullRequestBuild) {
-          messageTitle = "### $env.JOB_NAME - PR Build Failed ❌ 👎\\n**Title:** $env.CHANGE_TITLE\\n**Author:** $env.CHANGE_AUTHOR_EMAIL"
-        } else {
-          messageTitle = "### $env.JOB_NAME - Build Finished ❌ 👎"
+        if (currentBuild.result == 'FAILURE') {
+          postWebex(credentialsId: WEBEX_BOT_TOKEN,
+            recipientType: 'toRoom',
+            recipientId: "${WEBEX_ROOM_ID}",
+            message: """<strong>brain-dead build: <a href=\'$JOB_URL\'>$JOB_NAME</a> build #$BUILD_NUMBER is \${currentBuild.currentResult} (${env.GIT_COMMIT})</strong>"""
+          )
         }
-        sendWebexMessage(credentialsId: env.WEBEX_BOT_TOKEN,
-          recipientType: 'roomId',
-          recipientId: env.WEBEX_ROOM_ID,
-          message: "$messageTitle\\n"+
-                  "**Build URL:** [$env.JOB_NAME#$env.BUILD_NUMBER]($env.BUILD_URL)\\n"+
-                  "**Branch:** $env.BRANCH_NAME\\n"+
-                  "**Status:** FAILURE"
-        )
       }
-    }
-
-    cleanup {
-      script {
-        sh 'docker system prune -f'
-      }
-      cleanWs()
     }
   }
 }
