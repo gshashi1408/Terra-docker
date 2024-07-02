@@ -1,259 +1,43 @@
-@Library(['thor-shared-pipelines', 'sift-shared-library']) _
-
-pullRequestBuild = env.CHANGE_TARGET ? true : false;
-
-def buildArtifactName(String baseName) {
-  def artifactBaseName = baseName
-  def branchName = env.GIT_BRANCH.replaceAll('origin/', '')
-  def gitCommitHash = env.GIT_COMMIT_HASH
-  def artifactName
-
-  if (branchName == 'china') {
-      artifactName = "${artifactBaseName}:${env.GIT_TAG}-${gitCommitHash}-${currentBuild.number}"
-  } else {
-      def safeBranchName = branchName.replaceAll('[^A-Za-z0-9_-]', '_').toLowerCase()
-      artifactName = "${artifactBaseName}:${safeBranchName}"
-  }
-
-  return artifactName
-}
-
 pipeline {
-  agent {
-    label 'base'
-  }
+    agent any
 
-  options {
-    buildDiscarder(
-      logRotator (
-        numToKeepStr: '10'
-      )
-    )
-    instanceType('t3.xlarge')
-    instanceExecutors('1')
-    disableConcurrentBuilds()
-    timestamps()
-  }
-
-  environment {
-    CLJ_BINARY_URL = 'https://github.com/clj-holmes/clj-holmes/releases/latest/download/clj-holmes-ubuntu-latest'
-    SCANNER_HOME = tool 'sonar-scanner'
-    SECRET_SONARQUBE_TOKEN = credentials('cdaas-sonar-bot')
-    GIT_COMMITTER_EMAIL = sh(script: "git --no-pager show -s --format='%ae' $GIT_COMMIT", returnStdout: true).trim()
-    GIT_GENERIC_CREDS = 'sift-reporting-gen-github'
-    BRANCH_NAME = env.GIT_BRANCH.replaceAll('origin/', '')
-    AWS_ACC_PROD = '563853376529'
-    AWS_ACC_STAGE = '072824598875'
-    AWS_ROLE = 'jenkins-sift-cdaas'
-    AWS_REGION = 'us-west-2'
-    AWS_ECR_REPO = "dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-    ARTIFACT_NAME = 'china/orlok'
-    CORONA_GEN_USER = credentials('corona-cec-user')
-    CORONA_GEN_TOKEN = credentials('corona-cec-token')
-    CORONA_PRODUCT_ID = '12848'
-    CORONA_CSDL_ID = '243005'
-    CORONA_ENGINEERING_CONTACT = 'opendns-eng.sift@cisco.com'
-    CORONA_RELEASE_NAME = '1.1'
-    WEBEX_ROOM_ID = credentials('orlok-govcloud-webex-room-id')
-    WEBEX_BOT_TOKEN = 'sift-jenkins-webex-bot-token'
-    PUSH_DIRECTLY_TO_CHINA = true
-    CHINA_DEV_CRED_ID = 'cicdbotuser-china-dev-creds'
-    CHINA_DEV_IAM_ROLE = 'arn:aws-cn:iam::114040874283:role/CICDBotRole'
-    CHINA_AWS_ACC_DEV = '114040874283'
-    CHINA_DEV_ECR  = '114040874283.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
-    CHINA_AWS_REGION = 'cn-northwest-1'
-    CHINA_PROD_CRED_ID = 'cicdbotuser-china-prod-creds'
-    CHINA_PROD_IAM_ROLE = 'arn:aws-cn:iam::146618076670:role/CICDBotRole'
-    CHINA_AWS_ACC_PROD = '146618076670'
-    CHINA_PROD_ECR = '146618076670.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
-    MICROAPP1_NAME = 'microapp1'
-    MICROAPP2_NAME = 'microapp2'
-  }
-
-  stages {
-    stage('Clean workspace') {
-      steps {
-        cleanWs()
-      }
+    environment {
+        AWS_ACCOUNT_ID = 'your-aws-account-id'
+        AWS_REGION = 'your-aws-region'
+        REPO_NAME = 'your-ecr-repo-name'
+        IMAGE_TAG = "latest"
+        DOCKER_CREDENTIALS_ID = 'your-docker-credentials-id'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
     }
 
-    stage('Checkout repo code with tags') {
-      steps {
-        script {
-          def scmVars = checkout([
-            $class: 'GitSCM',
-            branches: scm.branches,
-            doGenerateSubmoduleConfigurations: scm.doGenerateSubmoduleConfigurations,
-            extensions: [[$class: 'CloneOption', noTags: false, reference: '', shallow: false]],
-            userRemoteConfigs: scm.userRemoteConfigs
-          ])
-          env.GIT_COMMIT_HASH = scmVars.GIT_COMMIT.substring(0,8)
-          echo "GIT_COMMIT_HASH: ${GIT_COMMIT_HASH}"
-          env.GIT_TAG = sh(script: 'git describe --tags --abbrev=0', returnStdout: true).trim()
-          if (env.BRANCH_NAME == 'china') {
-            currentBuild.displayName = "${env.GIT_TAG}_${currentBuild.number}"
-          } else {
-            currentBuild.displayName = "${env.GIT_TAG}_${env.BRANCH_NAME}_${GIT_COMMIT_HASH}_${currentBuild.number}"
-          }
-        }
-      }
-    }
-
-    stage('Static Analysis') {
-      steps {
-        withCredentials(
-          [usernamePassword(
-            credentialsId: env.GIT_GENERIC_CREDS,
-            usernameVariable: 'USER',
-            passwordVariable: 'PAT_TOKEN'
-          )]
-        ) {
-          sh """#!/usr/bin/env bash
-          set -e
-          echo "Downloading Clj-Holmes!..📥"
-          curl -sS -L ${env.CLJ_BINARY_URL} -o ./clj-holmes
-          chmod +x clj-holmes
-          echo "Fetching Clj-Holmes rules!..📥"
-          ./clj-holmes fetch-rules
-          echo "Performing Clj-Holmes scan!..🔎"
-          ./clj-holmes scan -p . --no-verbose --output-type stdout
-          echo "Recording clj-holmes scan results!..💾"
-          rm -rf security_scan_results/*
-          ./clj-holmes scan -p . --no-verbose --output-type json --output-file security_scan_results/clj_holmes_scan_results-${env.GIT_COMMIT_HASH}.json
-          ls -la security_scan_results/
-          echo 'Configuring git credentials...🛠️'
-          git config --global user.email "$USER@cisco.com"
-          git config --global user.name "$USER"
-          git config credential.helper \\
-            '!f() { echo username=$USER; echo "password=$PAT_TOKEN"; };f'
-          git add security_scan_results/*
-          git commit -m "clj-holmes scanning result"
-          """
-        }
-        script {
-          withSonarQubeEnv('cdaas-sonar-prod') {
-            sh """#!/usr/bin/env bash
-            ${SCANNER_HOME}/bin/sonar-scanner \\
-              -Dsonar.login=${SECRET_SONARQUBE_TOKEN} \\
-              -Dsonar.projectVersion=\$(git describe --tags --abbrev=0) \\
-              -Dsonar.branch.name=${env.BRANCH_NAME} \\
-              -Dproject.settings=sonar-project.properties \\
-            """
-          }
-          timeout(time: 5, unit: 'MINUTES') {
-            def qualitygate = waitForQualityGate()
-            currentBuild.description = "Quality Gate ${qualitygate.status}"
-            if (qualitygate.status != "OK") {
-              if (BRANCH_NAME != 'master') {
-                unstable "Quality Gate ${qualitygate.status}. Please, address new issues"
-              }
-              postWebex(credentialsId: WEBEX_BOT_TOKEN,
-                recipientType: 'toPersonEmail',
-                recipientId: "${GIT_COMMITTER_EMAIL}",
-                message: """<strong>brain-dead build: ${currentBuild.currentResult}. Quality Gate: ${qualitygate.status}. Please, address new issues (<a href=\'$JOB_URL\'>$JOB_NAME</a>)</strong>"""
-              )
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout the repository
+                git 'https://github.com/your-repo.git'
             }
-          }
         }
-      }
-    }
+        
+        stage('Build, Tag, and Push Docker Images') {
+            steps {
+                script {
+                    def folders = ['folder1', 'folder2', 'folder3']
+                    folders.each { folder ->
+                        def imageName = "${ECR_REGISTRY}/${REPO_NAME}-${folder}:${IMAGE_TAG}"
 
-    stage('Release Tag') {
-      when {
-        branch 'china'
-      }
-      steps {
-        withCredentials(
-          [usernamePassword(
-            credentialsId: env.GIT_GENERIC_CREDS,
-            usernameVariable: 'USER',
-            passwordVariable: 'PAT_TOKEN'
-            )
-          ]
-        ) {
-          sh """#!/usr/bin/env bash
-            set -e
-            SECSLEEP=10
+                        // Build the Docker image
+                        sh "docker build -t ${imageName} ${folder}"
 
-            echo 'Configuring git credentials...🛠️'
-            git config user.email "${USER}@cisco.com"
-            git config user.name "${USER}"
-            git config credential.helper \\
-              '!f() { echo username=${USER}; echo "password=${PAT_TOKEN}"; };f'
+                        // Login to Amazon ECR
+                        sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        """
 
-            echo "=============================="
-            echo "Current branch: ${env.BRANCH_NAME}"
-            echo "=============================="
-            NEWTAG=\$(git tag | ./ci/compute_release_tag.py)
-            echo "NEW release tag will be: \$NEWTAG"
-            echo "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
-            echo "Sleeping \$SECSLEEP seconds... last chance to abort"
-            sleep \$SECSLEEP
-
-            echo " "
-            git tag \$NEWTAG
-            git push origin \$NEWTAG
-            echo " "
-            if [ \$? -eq 0 ]; then
-              echo "pushed \$NEWTAG"
-            else
-              echo "push failed"
-            fi
-          """
-        }
-      }
-    }
-
-    stage('Build Docker Images') {
-      steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
-          script {
-            docker.withRegistry("https://${AWS_ECR_REPO}") {
-              dockerImage = docker.build("baseImage:${env.BRANCH_NAME}")
+                        // Push the Docker image to ECR
+                        sh "docker push ${imageName}"
+                    }
+                }
             }
-            dockerImage.push()
-          }
         }
-      }
     }
-
-    stage('Deploy microapp1') {
-      steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
-          script {
-            docker.withRegistry("https://${AWS_ECR_REPO}") {
-              dockerImage = docker.build("${MICROAPP1_NAME}:${env.BRANCH_NAME}")
-            }
-            dockerImage.push()
-          }
-        }
-      }
-    }
-
-    stage('Deploy microapp2') {
-      steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'arn:aws:iam::563853376529:role/sift-cdaas-deploy', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
-          script {
-            docker.withRegistry("https://${AWS_ECR_REPO}") {
-              dockerImage = docker.build("${MICROAPP2_NAME}:${env.BRANCH_NAME}")
-            }
-            dockerImage.push()
-          }
-        }
-      }
-    }
-  }
-  post {
-    failure {
-      script {
-        if (currentBuild.result == 'FAILURE') {
-          postWebex(credentialsId: WEBEX_BOT_TOKEN,
-            recipientType: 'toRoom',
-            recipientId: "${WEBEX_ROOM_ID}",
-            message: """<strong>brain-dead build: <a href=\'$JOB_URL\'>$JOB_NAME</a> build #$BUILD_NUMBER is \${currentBuild.currentResult} (${env.GIT_COMMIT})</strong>"""
-          )
-        }
-      }
-    }
-  }
 }
